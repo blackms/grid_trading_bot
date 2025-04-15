@@ -1,0 +1,124 @@
+{
+  "exchange": {
+    "name": "bybit",
+    "trading_fee": 0.0006,
+    "trading_mode": "live",
+    "market_type": "futures"
+  },
+  "futures_settings": {
+    "contract_type": "perpetual",
+    "leverage": 3,
+    "margin_type": "isolated",
+    "hedge_mode": false
+  },
+  "pair": {
+    "base_currency": "BTC",
+    "quote_currency": "USDT",
+    "contract_size": 1
+  },
+  "trading_settings": {
+    "timeframe": "1h",
+    "period": {
+      "start_date": "2025-01-01",
+      "end_date": "2025-04-15"
+    },
+    "initial_balance": 10000
+  },
+  "grid_strategy": {
+    "type": "simple_grid",
+    "spacing": "arithmetic",
+    "num_grids": 10,
+    "range": {
+      "top": 22000.0,
+      "bottom": 18000.0
+    },
+    "dynamic_grid": {
+      "trailing_enabled": true,
+      "trailing_activation_threshold": 0.02,
+      "trailing_distance_percentage": 0.01,
+      "trailing_cooldown_period": 300,
+      "volatility_adaptation_enabled": true,
+      "volatility_lookback_period": 24,
+      "volatility_grid_adjustment_factor": 1.5,
+      "grid_repositioning_enabled": true,
+      "grid_repositioning_threshold": 0.05,
+      "small_capital_optimization_enabled": true,
+      "min_order_value": 5.0
+    }
+  },
+  "risk_management": {
+    "take_profit": {
+      "enabled": false,
+      "threshold": 0.05
+    },
+    "stop_loss": {
+      "enabled": false,
+      "threshold": 0.05
+    },
+    "futures": {
+      "liquidation_protection": {
+        "enabled": true,
+        "threshold": 0.5
+      },
+      "max_position_size": 0.5,
+      "circuit_breaker": {
+        "enabled": true,
+        "price_change_threshold": 0.1,
+        "volume_spike_threshold": 3.0,
+        "cooldown_period": 300,
+        "max_daily_triggers": 3
+      },
+      "margin_health": {
+        "warning_threshold": 0.5,
+        "critical_threshold": 0.2,
+        "auto_reduce_enabled": true,
+        "auto_reduce_percentage": 0.25
+      },
+      "funding_rate": {
+        "monitoring": {
+          "enabled": true,
+          "update_interval": 900,
+          "notification_threshold": 1800
+        },
+        "thresholds": {
+          "high": 0.001,
+          "extreme": 0.003,
+          "cumulative": 0.01
+        },
+        "strategy_adjustments": {
+          "enabled": true,
+          "reduce_exposure_threshold": 0.002,
+          "reverse_position_threshold": 0.005,
+          "max_adjustment_percentage": 0.5
+        },
+        "forecasting": {
+          "enabled": true,
+          "forecast_window": 3,
+          "min_history_periods": 6,
+          "confidence_threshold": 0.7
+        },
+        "auto_hedge": {
+          "enabled": false,
+          "hedge_threshold": 0.003,
+          "max_hedge_ratio": 0.5,
+          "min_funding_duration": 24
+        }
+      },
+      "drawdown": {
+        "warning_threshold": 0.1,
+        "critical_threshold": 0.2,
+        "max_drawdown": 0.3,
+        "auto_close_enabled": false
+      },
+      "position_sizing": {
+        "max_capital_allocation": 0.2,
+        "scale_with_volatility": true,
+        "dynamic_leverage": true
+      }
+    }
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_to_file": true
+  }
+}

@@ -206,6 +206,103 @@ class ConfigManager:
         futures_risk = self.get_futures_risk_management()
         return futures_risk.get('max_position_size', None)
     
+    # --- Funding Rate Settings Accessor Methods ---
+    def get_funding_rate_settings(self):
+        futures_risk = self.get_futures_risk_management()
+        return futures_risk.get('funding_rate', {})
+    
+    def get_funding_rate_monitoring_settings(self):
+        funding_rate = self.get_funding_rate_settings()
+        return funding_rate.get('monitoring', {})
+    
+    def is_funding_rate_monitoring_enabled(self) -> bool:
+        monitoring = self.get_funding_rate_monitoring_settings()
+        return monitoring.get('enabled', False)
+    
+    def get_funding_rate_update_interval(self) -> int:
+        monitoring = self.get_funding_rate_monitoring_settings()
+        return monitoring.get('update_interval', 900)  # Default to 15 minutes
+    
+    def get_funding_rate_notification_threshold(self) -> int:
+        monitoring = self.get_funding_rate_monitoring_settings()
+        return monitoring.get('notification_threshold', 1800)  # Default to 30 minutes
+    
+    def get_funding_rate_thresholds(self):
+        funding_rate = self.get_funding_rate_settings()
+        return funding_rate.get('thresholds', {})
+    
+    def get_funding_rate_high_threshold(self) -> float:
+        thresholds = self.get_funding_rate_thresholds()
+        return thresholds.get('high', 0.001)  # Default to 0.1%
+    
+    def get_funding_rate_extreme_threshold(self) -> float:
+        thresholds = self.get_funding_rate_thresholds()
+        return thresholds.get('extreme', 0.003)  # Default to 0.3%
+    
+    def get_funding_rate_cumulative_threshold(self) -> float:
+        thresholds = self.get_funding_rate_thresholds()
+        return thresholds.get('cumulative', 0.01)  # Default to 1%
+    
+    def get_funding_rate_strategy_adjustment_settings(self):
+        funding_rate = self.get_funding_rate_settings()
+        return funding_rate.get('strategy_adjustments', {})
+    
+    def is_funding_rate_strategy_adjustment_enabled(self) -> bool:
+        adjustments = self.get_funding_rate_strategy_adjustment_settings()
+        return adjustments.get('enabled', False)
+    
+    def get_funding_rate_reduce_exposure_threshold(self) -> float:
+        adjustments = self.get_funding_rate_strategy_adjustment_settings()
+        return adjustments.get('reduce_exposure_threshold', 0.002)  # Default to 0.2%
+    
+    def get_funding_rate_reverse_position_threshold(self) -> float:
+        adjustments = self.get_funding_rate_strategy_adjustment_settings()
+        return adjustments.get('reverse_position_threshold', 0.005)  # Default to 0.5%
+    
+    def get_funding_rate_max_adjustment_percentage(self) -> float:
+        adjustments = self.get_funding_rate_strategy_adjustment_settings()
+        return adjustments.get('max_adjustment_percentage', 0.5)  # Default to 50%
+    
+    def get_funding_rate_forecasting_settings(self):
+        funding_rate = self.get_funding_rate_settings()
+        return funding_rate.get('forecasting', {})
+    
+    def is_funding_rate_forecasting_enabled(self) -> bool:
+        forecasting = self.get_funding_rate_forecasting_settings()
+        return forecasting.get('enabled', False)
+    
+    def get_funding_rate_forecast_window(self) -> int:
+        forecasting = self.get_funding_rate_forecasting_settings()
+        return forecasting.get('forecast_window', 3)  # Default to 3 periods
+    
+    def get_funding_rate_min_history_periods(self) -> int:
+        forecasting = self.get_funding_rate_forecasting_settings()
+        return forecasting.get('min_history_periods', 6)  # Default to 6 periods
+    
+    def get_funding_rate_confidence_threshold(self) -> float:
+        forecasting = self.get_funding_rate_forecasting_settings()
+        return forecasting.get('confidence_threshold', 0.7)  # Default to 70%
+    
+    def get_funding_rate_auto_hedge_settings(self):
+        funding_rate = self.get_funding_rate_settings()
+        return funding_rate.get('auto_hedge', {})
+    
+    def is_funding_rate_auto_hedge_enabled(self) -> bool:
+        auto_hedge = self.get_funding_rate_auto_hedge_settings()
+        return auto_hedge.get('enabled', False)
+    
+    def get_funding_rate_hedge_threshold(self) -> float:
+        auto_hedge = self.get_funding_rate_auto_hedge_settings()
+        return auto_hedge.get('hedge_threshold', 0.003)  # Default to 0.3%
+    
+    def get_funding_rate_max_hedge_ratio(self) -> float:
+        auto_hedge = self.get_funding_rate_auto_hedge_settings()
+        return auto_hedge.get('max_hedge_ratio', 0.5)  # Default to 50%
+    
+    def get_funding_rate_min_funding_duration(self) -> int:
+        auto_hedge = self.get_funding_rate_auto_hedge_settings()
+        return auto_hedge.get('min_funding_duration', 24)  # Default to 24 hours
+    
     # --- Logging Accessor Methods ---
     def get_logging(self):
         return self.config.get('logging', {})
@@ -217,3 +314,56 @@ class ConfigManager:
     def should_log_to_file(self) -> bool:
         logging = self.get_logging()
         return logging.get('log_to_file', False)
+    
+    # --- Dynamic Grid Settings Accessor Methods ---
+    def get_dynamic_grid_settings(self):
+        grid_settings = self.get_grid_settings()
+        return grid_settings.get('dynamic_grid', {})
+    
+    def is_dynamic_grid_enabled(self) -> bool:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return bool(dynamic_grid)  # Return True if dynamic_grid is not empty
+    
+    def is_trailing_enabled(self) -> bool:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('trailing_enabled', False)
+    
+    def get_trailing_activation_threshold(self) -> float:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('trailing_activation_threshold', 0.02)  # Default to 2%
+    
+    def get_trailing_distance_percentage(self) -> float:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('trailing_distance_percentage', 0.01)  # Default to 1%
+    
+    def get_trailing_cooldown_period(self) -> int:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('trailing_cooldown_period', 300)  # Default to 5 minutes
+    
+    def is_volatility_adaptation_enabled(self) -> bool:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('volatility_adaptation_enabled', False)
+    
+    def get_volatility_lookback_period(self) -> int:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('volatility_lookback_period', 24)  # Default to 24 hours
+    
+    def get_volatility_grid_adjustment_factor(self) -> float:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('volatility_grid_adjustment_factor', 1.5)  # Default to 1.5x
+    
+    def is_grid_repositioning_enabled(self) -> bool:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('grid_repositioning_enabled', False)
+    
+    def get_grid_repositioning_threshold(self) -> float:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('grid_repositioning_threshold', 0.05)  # Default to 5%
+    
+    def is_small_capital_optimization_enabled(self) -> bool:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('small_capital_optimization_enabled', False)
+    
+    def get_min_order_value(self) -> float:
+        dynamic_grid = self.get_dynamic_grid_settings()
+        return dynamic_grid.get('min_order_value', 5.0)  # Default to 5 units of quote currency

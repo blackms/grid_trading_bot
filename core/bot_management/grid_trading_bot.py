@@ -17,7 +17,11 @@ from core.order_handling.execution_strategy.order_execution_strategy_factory imp
 from core.services.exceptions import UnsupportedExchangeError, DataFetchError, UnsupportedTimeframeError
 from config.config_manager import ConfigManager
 from config.trading_mode import TradingMode
+from config.market_type import MarketType
 from .notification.notification_handler import NotificationHandler
+from core.order_handling.funding_rate_tracker import FundingRateTracker
+from core.order_handling.futures_position_manager import FuturesPositionManager
+from core.order_handling.futures_risk_manager import FuturesRiskManager
 
 class GridTradingBot:
     def __init__(
@@ -44,7 +48,8 @@ class GridTradingBot:
             quote_currency: str = self.config_manager.get_quote_currency()
             trading_pair = f"{base_currency}/{quote_currency}"
             strategy_type: StrategyType = self.config_manager.get_strategy_type()
-            self.logger.info(f"Starting Grid Trading Bot in {self.trading_mode.value} mode with strategy: {strategy_type.value}")
+            market_type: MarketType = self.config_manager.get_market_type()
+            self.logger.info(f"Starting Grid Trading Bot in {self.trading_mode.value} mode with strategy: {strategy_type.value}, market type: {market_type.value}")
             self.is_running = False
 
             self.exchange_service = ExchangeServiceFactory.create_exchange_service(self.config_manager, self.trading_mode)
@@ -52,6 +57,34 @@ class GridTradingBot:
             grid_manager = GridManager(self.config_manager, strategy_type)
             order_validator = OrderValidator()
             fee_calculator = FeeCalculator(self.config_manager)
+            
+            # Initialize futures-specific components if using futures market
+            self.futures_position_manager = None
+            self.futures_risk_manager = None
+            self.funding_rate_tracker = None
+            
+            if market_type == MarketType.FUTURES:
+                self.logger.info("Initializing futures-specific components")
+                self.futures_position_manager = FuturesPositionManager(
+                    config_manager=self.config_manager,
+                    exchange_service=self.exchange_service,
+                    event_bus=self.event_bus
+                )
+                
+                self.futures_risk_manager = FuturesRiskManager(
+                    config_manager=self.config_manager,
+                    exchange_service=self.exchange_service,
+                    event_bus=self.event_bus,
+                    position_manager=self.futures_position_manager
+                )
+                
+                # Initialize funding rate tracker for perpetual contracts
+                if self.config_manager.get_contract_type() == "perpetual":
+                    self.funding_rate_tracker = FundingRateTracker(
+                        config_manager=self.config_manager,
+                        exchange_service=self.exchange_service,
+                        event_bus=self.event_bus
+                    )
 
             self.balance_tracker = BalanceTracker(
                 event_bus=self.event_bus,
@@ -94,7 +127,9 @@ class GridTradingBot:
                 trading_performance_analyzer,
                 self.trading_mode,
                 trading_pair,
-                plotter
+                plotter,
+                self.funding_rate_tracker,
+                self.futures_position_manager
             )
 
         except (UnsupportedExchangeError, DataFetchError, UnsupportedTimeframeError) as e:
@@ -117,6 +152,18 @@ class GridTradingBot:
             )
 
             self.order_status_tracker.start_tracking()
+            
+            # Initialize futures components if applicable
+            if self.config_manager.is_futures_market():
+                if self.futures_position_manager:
+                    await self.futures_position_manager.initialize()
+                
+                if self.futures_risk_manager:
+                    await self.futures_risk_manager.initialize()
+                
+                if self.funding_rate_tracker:
+                    await self.funding_rate_tracker.initialize()
+            
             self.strategy.initialize_strategy()
             await self.strategy.run()
 
@@ -151,6 +198,18 @@ class GridTradingBot:
         try:
             await self.order_status_tracker.stop_tracking()
             await self.strategy.stop()
+            
+            # Shutdown futures components if applicable
+            if self.config_manager.is_futures_market():
+                if self.funding_rate_tracker:
+                    await self.funding_rate_tracker.shutdown()
+                
+                if self.futures_risk_manager:
+                    await self.futures_risk_manager.shutdown()
+                
+                if self.futures_position_manager:
+                    await self.futures_position_manager.shutdown()
+            
             self.is_running = False
 
         except Exception as e:
@@ -188,6 +247,17 @@ class GridTradingBot:
             "strategy": await self._check_strategy_health(),
             "exchange_status": await self._get_exchange_status()
         }
+        
+        # Add futures-specific health checks if applicable
+        if self.config_manager.is_futures_market():
+            if self.futures_position_manager:
+                health_status["futures_position_manager"] = True  # Could add more detailed checks
+            
+            if self.futures_risk_manager:
+                health_status["futures_risk_manager"] = True  # Could add more detailed checks
+            
+            if self.funding_rate_tracker:
+                health_status["funding_rate_tracker"] = True  # Could add more detailed checks
 
         health_status["overall"] = all(health_status.values())
         return health_status
@@ -203,9 +273,47 @@ class GridTradingBot:
         return exchange_status.get("status", "unknown")
     
     def get_balances(self) -> Dict[str, float]:
-        return {
+        balances = {
             "fiat": self.balance_tracker.balance,
             "reserved_fiat": self.balance_tracker.reserved_fiat,
             "crypto": self.balance_tracker.crypto_balance,
             "reserved_crypto": self.balance_tracker.reserved_crypto
         }
+        
+        # Add futures-specific balance information if applicable
+        if self.config_manager.is_futures_market() and self.futures_position_manager:
+            balances["futures"] = {
+                "positions": self.futures_position_manager.get_all_positions()
+            }
+            
+            # Add funding rate information if available
+            if self.funding_rate_tracker:
+                balances["futures"]["current_funding_rate"] = self.funding_rate_tracker.current_funding_rate
+                if self.funding_rate_tracker.next_funding_time:
+                    balances["futures"]["next_funding_time"] = self.funding_rate_tracker.next_funding_time.isoformat()
+        
+        return balances
+    
+    async def get_funding_rate_info(self) -> Optional[Dict[str, Any]]:
+        """
+        Get current funding rate information if using perpetual futures.
+        
+        Returns:
+            Dictionary with funding rate information or None if not applicable
+        """
+        if not self.config_manager.is_futures_market() or not self.funding_rate_tracker:
+            return None
+            
+        return await self.funding_rate_tracker.get_current_funding_info()
+    
+    async def get_funding_rate_forecast(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get funding rate forecast if using perpetual futures.
+        
+        Returns:
+            List of forecasted funding rates or None if not applicable
+        """
+        if not self.config_manager.is_futures_market() or not self.funding_rate_tracker:
+            return None
+            
+        return await self.funding_rate_tracker.forecast_funding_rates()

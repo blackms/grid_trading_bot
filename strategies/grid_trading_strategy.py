@@ -1,15 +1,19 @@
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any, List
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 from .trading_strategy_interface import TradingStrategyInterface
 from config.trading_mode import TradingMode
+from config.market_type import MarketType
 from core.bot_management.event_bus import EventBus, Events
 from config.config_manager import ConfigManager
 from core.services.exchange_interface import ExchangeInterface
 from core.grid_management.grid_manager import GridManager
 from core.order_handling.order_manager import OrderManager
 from core.order_handling.balance_tracker import BalanceTracker
+from core.order_handling.funding_rate_tracker import FundingRateTracker, FundingEvents
+from core.order_handling.futures_position_manager import FuturesPositionManager, PositionEvents
 from strategies.trading_performance_analyzer import TradingPerformanceAnalyzer
 from strategies.plotter import Plotter
 
@@ -27,7 +31,9 @@ class GridTradingStrategy(TradingStrategyInterface):
         trading_performance_analyzer: TradingPerformanceAnalyzer,
         trading_mode: TradingMode,
         trading_pair: str,
-        plotter: Optional[Plotter] = None
+        plotter: Optional[Plotter] = None,
+        funding_rate_tracker: Optional[FundingRateTracker] = None,
+        futures_position_manager: Optional[FuturesPositionManager] = None
     ):
         super().__init__(config_manager, balance_tracker)
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -40,8 +46,24 @@ class GridTradingStrategy(TradingStrategyInterface):
         self.trading_pair = trading_pair
         self.plotter = plotter
         self.data = self._initialize_historical_data()
-        self.live_trading_metrics = [] 
+        self.live_trading_metrics = []
         self._running = True
+        
+        # Futures-specific components
+        self.funding_rate_tracker = funding_rate_tracker
+        self.futures_position_manager = futures_position_manager
+        self.market_type = self.config_manager.get_market_type()
+        self.is_futures_market = self.market_type == MarketType.FUTURES
+        
+        # Subscribe to funding rate events if using perpetual futures
+        if self.is_futures_market and self.funding_rate_tracker:
+            self.event_bus.subscribe(FundingEvents.FUNDING_RATE_UPDATE, self._handle_funding_rate_update)
+            self.event_bus.subscribe(FundingEvents.UPCOMING_FUNDING_NOTIFICATION, self._handle_upcoming_funding)
+            self.event_bus.subscribe(FundingEvents.FUNDING_TREND_CHANGE, self._handle_funding_trend_change)
+            
+        # Subscribe to position events if using futures
+        if self.is_futures_market and self.futures_position_manager:
+            self.event_bus.subscribe(PositionEvents.POSITION_LIQUIDATION_WARNING, self._handle_liquidation_warning)
     
     def _initialize_historical_data(self) -> Optional[pd.DataFrame]:
         """
@@ -76,6 +98,11 @@ class GridTradingStrategy(TradingStrategyInterface):
         This method prepares the strategy to be ready for trading.
         """
         self.grid_manager.initialize_grids_and_levels()
+        
+        # Initialize funding rate tracking data if using perpetual futures
+        if self.is_futures_market and self.config_manager.get_contract_type() == "perpetual":
+            self.funding_payments = []
+            self.funding_rate_history = []
     
     async def stop(self):
         """
@@ -155,6 +182,10 @@ class GridTradingStrategy(TradingStrategyInterface):
 
                 if await self._handle_take_profit_stop_loss(current_price):
                     return
+                
+                # Check for funding rate-based strategy adjustments if using perpetual futures
+                if self.is_futures_market and self.funding_rate_tracker:
+                    await self._check_funding_rate_strategy_adjustments(current_price)
                 
                 last_price = current_price
 
@@ -350,6 +381,126 @@ class GridTradingStrategy(TradingStrategyInterface):
             await self.order_manager.execute_take_profit_or_stop_loss_order(current_price=current_price, stop_loss_order=True)
             return True
         return False
+    
+    async def _handle_funding_rate_update(self, data: Dict[str, Any]) -> None:
+        """
+        Handles funding rate update events from the FundingRateTracker.
+        
+        Args:
+            data: Funding rate update data
+        """
+        self.logger.info(f"Funding rate updated: {data['funding_rate']:.6f} for {data['pair']}")
+        self.funding_rate_history.append(data)
+        
+        # Log the next funding time
+        if data.get('next_funding_time'):
+            next_funding_time = datetime.fromisoformat(data['next_funding_time'])
+            time_to_funding = next_funding_time - datetime.utcnow()
+            self.logger.info(f"Next funding in {time_to_funding.total_seconds() / 60:.1f} minutes")
+    
+    async def _handle_upcoming_funding(self, data: Dict[str, Any]) -> None:
+        """
+        Handles upcoming funding notification events from the FundingRateTracker.
+        
+        Args:
+            data: Upcoming funding notification data
+        """
+        minutes_to_funding = data.get('time_to_funding_minutes', 0)
+        estimated_payment = data.get('estimated_payment', 0.0)
+        will_pay = data.get('will_pay', False)
+        
+        action_message = "pay" if will_pay else "receive"
+        self.logger.info(
+            f"Upcoming funding in {minutes_to_funding} minutes. "
+            f"Estimated to {action_message} {abs(estimated_payment):.6f} {self.config_manager.get_quote_currency()}"
+        )
+        
+        # Consider adjusting positions before funding if the payment is significant
+        if will_pay and abs(estimated_payment) > 1.0:  # Threshold for significant payment
+            self.logger.info("Considering position adjustment before funding payment")
+            # Implementation would depend on the specific strategy
+    
+    async def _handle_funding_trend_change(self, data: Dict[str, Any]) -> None:
+        """
+        Handles funding trend change events from the FundingRateTracker.
+        
+        Args:
+            data: Funding trend change data
+        """
+        trend_direction = data.get('trend_direction', '')
+        short_term_avg = data.get('short_term_average', 0.0)
+        long_term_avg = data.get('long_term_average', 0.0)
+        
+        self.logger.info(
+            f"Funding rate trend changing: {trend_direction}. "
+            f"Short-term avg: {short_term_avg:.6f}, Long-term avg: {long_term_avg:.6f}"
+        )
+    
+    async def _handle_liquidation_warning(self, data: Dict[str, Any]) -> None:
+        """
+        Handles liquidation warning events from the FuturesPositionManager.
+        
+        Args:
+            data: Liquidation warning data
+        """
+        pair = data.get('pair', '')
+        current_price = data.get('current_price', 0.0)
+        liquidation_price = data.get('liquidation_price', 0.0)
+        distance = data.get('distance_to_liquidation', 0.0)
+        
+        self.logger.warning(
+            f"LIQUIDATION WARNING for {pair}: "
+            f"Current price: {current_price}, Liquidation price: {liquidation_price}, "
+            f"Distance: {distance:.2%}"
+        )
+        
+        # Take immediate action to reduce liquidation risk
+        # This could involve reducing position size, adding margin, or closing the position
+        if distance < 0.05:  # If very close to liquidation (5%)
+            self.logger.warning("Critical liquidation risk! Taking protective action...")
+            # Implementation would depend on the specific risk management strategy
+    
+    async def _check_funding_rate_strategy_adjustments(self, current_price: float) -> None:
+        """
+        Checks if strategy adjustments are needed based on funding rates.
+        
+        Args:
+            current_price: Current market price
+        """
+        if not self.funding_rate_tracker:
+            return
+            
+        # Get current funding rate
+        current_funding_rate = self.funding_rate_tracker.current_funding_rate
+        
+        # Adjust strategy based on funding rate
+        if abs(current_funding_rate) > 0.001:  # 0.1% threshold
+            if current_funding_rate > 0:
+                # Positive funding rate - longs pay shorts
+                # Consider reducing long exposure or increasing short exposure
+                self.logger.info(f"High positive funding rate ({current_funding_rate:.6f}). Consider adjusting position.")
+            else:
+                # Negative funding rate - shorts pay longs
+                # Consider increasing long exposure or reducing short exposure
+                self.logger.info(f"High negative funding rate ({current_funding_rate:.6f}). Consider adjusting position.")
+    
+    def get_funding_rate_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of funding rate data.
+        
+        Returns:
+            Dictionary with funding rate summary
+        """
+        if not self.is_futures_market or not self.funding_rate_tracker:
+            return {"enabled": False}
+            
+        return {
+            "enabled": True,
+            "current_rate": self.funding_rate_tracker.current_funding_rate,
+            "next_funding_time": self.funding_rate_tracker.next_funding_time.isoformat() if self.funding_rate_tracker.next_funding_time else None,
+            "funding_history_count": len(self.funding_rate_history),
+            "funding_payments_count": len(self.funding_payments)
+        }
     
     def get_formatted_orders(self):
         """
