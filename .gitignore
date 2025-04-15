@@ -39,3 +39,6 @@ grafana-data/
 # Project specific
 /data/
 logs/*
+
+project_journal/
+chats.db

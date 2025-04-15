@@ -1,5 +1,5 @@
 import logging, traceback
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from core.services.exchange_service_factory import ExchangeServiceFactory
 from strategies.strategy_type import StrategyType
 from strategies.grid_trading_strategy import GridTradingStrategy
@@ -22,6 +22,7 @@ from .notification.notification_handler import NotificationHandler
 from core.order_handling.funding_rate_tracker import FundingRateTracker
 from core.order_handling.futures_position_manager import FuturesPositionManager
 from core.order_handling.futures_risk_manager import FuturesRiskManager
+from core.order_handling.stop_loss_manager import StopLossManager
 
 class GridTradingBot:
     def __init__(
@@ -62,6 +63,8 @@ class GridTradingBot:
             self.futures_position_manager = None
             self.futures_risk_manager = None
             self.funding_rate_tracker = None
+            self.dynamic_grid_manager = None
+            self.stop_loss_manager = None
             
             if market_type == MarketType.FUTURES:
                 self.logger.info("Initializing futures-specific components")
@@ -85,6 +88,26 @@ class GridTradingBot:
                         exchange_service=self.exchange_service,
                         event_bus=self.event_bus
                     )
+                
+                # Initialize dynamic grid manager for futures
+                if self.config_manager.is_dynamic_grid_enabled():
+                    from core.grid_management.dynamic_grid_manager import DynamicGridManager
+                    self.dynamic_grid_manager = DynamicGridManager(
+                        config_manager=self.config_manager,
+                        strategy_type=strategy_type,
+                        position_manager=self.futures_position_manager,
+                        risk_manager=self.futures_risk_manager,
+                        event_bus=self.event_bus
+                    )
+                
+                # Initialize stop loss manager for futures
+                self.stop_loss_manager = StopLossManager(
+                    config_manager=self.config_manager,
+                    exchange_service=self.exchange_service,
+                    event_bus=self.event_bus,
+                    position_manager=self.futures_position_manager,
+                    risk_manager=self.futures_risk_manager
+                )
 
             self.balance_tracker = BalanceTracker(
                 event_bus=self.event_bus,
@@ -117,11 +140,15 @@ class GridTradingBot:
             
             trading_performance_analyzer = TradingPerformanceAnalyzer(self.config_manager, order_book)
             plotter = Plotter(grid_manager, order_book) if self.trading_mode == TradingMode.BACKTEST else None
+            
+            # Use dynamic grid manager if available, otherwise use standard grid manager
+            grid_manager_to_use = self.dynamic_grid_manager if self.dynamic_grid_manager else grid_manager
+            
             self.strategy = GridTradingStrategy(
                 self.config_manager,
                 self.event_bus,
                 self.exchange_service,
-                grid_manager,
+                grid_manager_to_use,
                 order_manager,
                 self.balance_tracker,
                 trading_performance_analyzer,
@@ -129,7 +156,9 @@ class GridTradingBot:
                 trading_pair,
                 plotter,
                 self.funding_rate_tracker,
-                self.futures_position_manager
+                self.futures_position_manager,
+                self.futures_risk_manager,
+                self.stop_loss_manager
             )
 
         except (UnsupportedExchangeError, DataFetchError, UnsupportedTimeframeError) as e:
@@ -163,6 +192,12 @@ class GridTradingBot:
                 
                 if self.funding_rate_tracker:
                     await self.funding_rate_tracker.initialize()
+                    
+                if self.dynamic_grid_manager:
+                    await self.dynamic_grid_manager.initialize_dynamic_grids()
+                    
+                if self.stop_loss_manager:
+                    await self.stop_loss_manager.initialize()
             
             self.strategy.initialize_strategy()
             await self.strategy.run()
@@ -203,6 +238,12 @@ class GridTradingBot:
             if self.config_manager.is_futures_market():
                 if self.funding_rate_tracker:
                     await self.funding_rate_tracker.shutdown()
+                
+                if self.stop_loss_manager:
+                    await self.stop_loss_manager.shutdown()
+                    
+                if self.dynamic_grid_manager:
+                    await self.dynamic_grid_manager.shutdown()
                 
                 if self.futures_risk_manager:
                     await self.futures_risk_manager.shutdown()
@@ -258,6 +299,12 @@ class GridTradingBot:
             
             if self.funding_rate_tracker:
                 health_status["funding_rate_tracker"] = True  # Could add more detailed checks
+                
+            if self.dynamic_grid_manager:
+                health_status["dynamic_grid_manager"] = True  # Could add more detailed checks
+                
+            if self.stop_loss_manager:
+                health_status["stop_loss_manager"] = True  # Could add more detailed checks
 
         health_status["overall"] = all(health_status.values())
         return health_status
@@ -291,6 +338,14 @@ class GridTradingBot:
                 balances["futures"]["current_funding_rate"] = self.funding_rate_tracker.current_funding_rate
                 if self.funding_rate_tracker.next_funding_time:
                     balances["futures"]["next_funding_time"] = self.funding_rate_tracker.next_funding_time.isoformat()
+            
+            # Add risk metrics if available
+            if self.futures_risk_manager:
+                balances["futures"]["risk_metrics"] = self.futures_risk_manager.risk_metrics
+                
+            # Add stop loss metrics if available
+            if self.stop_loss_manager:
+                balances["futures"]["stop_loss_metrics"] = self.stop_loss_manager.stop_loss_metrics
         
         return balances
     
@@ -317,3 +372,43 @@ class GridTradingBot:
             return None
             
         return await self.funding_rate_tracker.forecast_funding_rates()
+        
+    async def get_stop_loss_metrics(self) -> Optional[Dict[str, Any]]:
+        """
+        Get stop loss metrics if using futures.
+        
+        Returns:
+            Dictionary with stop loss metrics or None if not applicable
+        """
+        if not self.config_manager.is_futures_market() or not self.stop_loss_manager:
+            return None
+            
+        return await self.stop_loss_manager.get_stop_loss_metrics()
+        
+    async def update_stop_loss_settings(self, new_settings: Dict[str, Any]) -> bool:
+        """
+        Update stop loss settings if using futures.
+        
+        Args:
+            new_settings: Dictionary with new stop loss settings
+            
+        Returns:
+            True if settings were updated successfully, False otherwise
+        """
+        if not self.config_manager.is_futures_market() or not self.stop_loss_manager:
+            return False
+            
+        await self.stop_loss_manager.update_stop_loss_settings(new_settings)
+        return True
+        
+    async def get_risk_metrics(self) -> Optional[Dict[str, Any]]:
+        """
+        Get risk metrics if using futures.
+        
+        Returns:
+            Dictionary with risk metrics or None if not applicable
+        """
+        if not self.config_manager.is_futures_market() or not self.futures_risk_manager:
+            return None
+            
+        return self.futures_risk_manager.risk_metrics

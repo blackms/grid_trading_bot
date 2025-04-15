@@ -1,7 +1,8 @@
 import ccxt, logging, time, os
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 import pandas as pd
 from config.config_manager import ConfigManager
+from config.market_type import MarketType
 from utils.constants import CANDLE_LIMITS, TIMEFRAME_MAPPINGS
 from .exchange_interface import ExchangeInterface
 from .exceptions import UnsupportedExchangeError, DataFetchError, UnsupportedTimeframeError, HistoricalMarketDataFileNotFoundError, UnsupportedPairError
@@ -12,13 +13,40 @@ class BacktestExchangeService(ExchangeInterface):
         self.config_manager = config_manager
         self.historical_data_file = self.config_manager.get_historical_data_file()
         self.exchange_name = self.config_manager.get_exchange_name()
+        self.market_type = self.config_manager.get_market_type()
         self.exchange = self._initialize_exchange()
+        
+        # Initialize futures settings if applicable
+        if self.market_type == MarketType.FUTURES:
+            self._initialize_futures_settings()
     
     def _initialize_exchange(self) -> Optional[ccxt.Exchange]:
         try:
-            return getattr(ccxt, self.exchange_name)()
+            options = {}
+            
+            # Add futures-specific options if needed
+            if self.market_type == MarketType.FUTURES:
+                options['options'] = {
+                    'defaultType': 'future',
+                    'marginType': self.config_manager.get_margin_type(),
+                    'hedgeMode': self.config_manager.is_hedge_mode_enabled()
+                }
+                
+            exchange = getattr(ccxt, self.exchange_name)(options)
+            return exchange
         except AttributeError:
             raise UnsupportedExchangeError(f"The exchange '{self.exchange_name}' is not supported.")
+            
+    def _initialize_futures_settings(self) -> None:
+        """Initialize futures-specific settings for backtesting."""
+        self.logger.info("Initializing futures settings for backtesting")
+        self.leverage = self.config_manager.get_leverage()
+        self.margin_type = self.config_manager.get_margin_type()
+        self.hedge_mode = self.config_manager.is_hedge_mode_enabled()
+        self.contract_size = self.config_manager.get_contract_size()
+        
+        # Store simulated positions for backtesting
+        self.positions = {}
     
     def _is_timeframe_supported(self, timeframe: str) -> bool:
         if timeframe not in self.exchange.timeframes:
@@ -152,12 +180,13 @@ class BacktestExchangeService(ExchangeInterface):
                     raise DataFetchError(f"Failed to fetch data after {retries} attempts: {str(e)}")
 
     async def place_order(
-        self, 
-        pair: str, 
-        order_side: str, 
-        order_type: str, 
-        amount: float, 
-        price: Optional[float] = None
+        self,
+        pair: str,
+        order_side: str,
+        order_type: str,
+        amount: float,
+        price: Optional[float] = None,
+        params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Union[str, float]]:
         raise NotImplementedError("place_order is not used in backtesting")
 
@@ -182,3 +211,124 @@ class BacktestExchangeService(ExchangeInterface):
     
     async def close_connection(self) -> None:
         self.logger.info("[BACKTEST] Closing WebSocket connection...")
+        
+    async def set_leverage(
+        self,
+        pair: str,
+        leverage: int,
+        margin_mode: str = 'isolated'
+    ) -> Dict[str, Any]:
+        """Sets the leverage and margin mode for a specific trading pair in backtesting."""
+        self.logger.info(f"[BACKTEST] Setting leverage to {leverage}x and margin mode to {margin_mode} for {pair}")
+        self.leverage = leverage
+        self.margin_type = margin_mode
+        
+        # Store the leverage settings for this pair
+        if pair not in self.positions:
+            self.positions[pair] = {
+                'leverage': leverage,
+                'margin_mode': margin_mode,
+                'long': None,
+                'short': None
+            }
+        else:
+            self.positions[pair]['leverage'] = leverage
+            self.positions[pair]['margin_mode'] = margin_mode
+            
+        return {
+            'leverage': leverage,
+            'marginMode': margin_mode,
+            'pair': pair,
+            'success': True
+        }
+    
+    async def get_positions(
+        self,
+        pair: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetches current open positions in backtesting, optionally filtered by trading pair."""
+        self.logger.info(f"[BACKTEST] Getting positions for {pair if pair else 'all pairs'}")
+        
+        result = []
+        
+        # If a specific pair is requested
+        if pair and pair in self.positions:
+            for side in ['long', 'short']:
+                position = self.positions[pair].get(side)
+                if position and position.get('size', 0) > 0:
+                    result.append(position)
+        # If all positions are requested
+        elif not pair:
+            for p, position_data in self.positions.items():
+                for side in ['long', 'short']:
+                    position = position_data.get(side)
+                    if position and position.get('size', 0) > 0:
+                        result.append(position)
+                        
+        return result
+    
+    async def close_position(
+        self,
+        pair: str,
+        position_side: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Closes an open position for the specified trading pair and side in backtesting."""
+        self.logger.info(f"[BACKTEST] Closing position for {pair}, side: {position_side if position_side else 'all'}")
+        
+        if pair not in self.positions:
+            return {"status": "no_position", "message": f"No open position found for {pair}"}
+            
+        sides_to_close = ['long', 'short'] if not position_side else [position_side.lower()]
+        closed_positions = []
+        
+        for side in sides_to_close:
+            if self.positions[pair].get(side) and self.positions[pair][side].get('size', 0) > 0:
+                closed_position = self.positions[pair][side].copy()
+                self.positions[pair][side] = None
+                closed_positions.append(closed_position)
+                
+        if not closed_positions:
+            return {"status": "no_position", "message": f"No {position_side if position_side else ''} position found for {pair}"}
+            
+        return {"status": "closed", "positions": closed_positions}
+    
+    async def get_funding_rate(
+        self,
+        pair: str
+    ) -> Dict[str, Any]:
+        """Fetches the current funding rate for a perpetual futures contract in backtesting."""
+        self.logger.info(f"[BACKTEST] Getting funding rate for {pair}")
+        
+        # In backtesting, we can simulate a funding rate or use a fixed value
+        return {
+            'pair': pair,
+            'fundingRate': 0.0001,  # Simulated funding rate (0.01% per 8 hours)
+            'fundingTimestamp': int(time.time() * 1000),
+            'nextFundingTimestamp': int(time.time() * 1000) + (8 * 60 * 60 * 1000),  # 8 hours later
+            'previousFundingTimestamp': int(time.time() * 1000) - (8 * 60 * 60 * 1000)  # 8 hours ago
+        }
+    
+    async def get_contract_specifications(
+        self,
+        pair: str
+    ) -> Dict[str, Any]:
+        """Fetches contract specifications for a futures contract in backtesting."""
+        self.logger.info(f"[BACKTEST] Getting contract specifications for {pair}")
+        
+        # Return simulated contract specifications based on the pair
+        base_currency, quote_currency = pair.split('/')
+        
+        return {
+            "pair": pair,
+            "contract_size": self.contract_size,
+            "price_precision": 2,
+            "amount_precision": 3,
+            "minimum_amount": 0.001,
+            "maximum_amount": 1000,
+            "minimum_cost": 5,
+            "maximum_leverage": 100,
+            "maintenance_margin_rate": 0.005,  # 0.5%
+            "is_inverse": False,
+            "is_linear": True,
+            "settlement_currency": quote_currency
+        }
