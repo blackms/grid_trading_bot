@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, TYPE_CHECKING
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -14,8 +14,13 @@ from core.order_handling.order_manager import OrderManager
 from core.order_handling.balance_tracker import BalanceTracker
 from core.order_handling.funding_rate_tracker import FundingRateTracker, FundingEvents
 from core.order_handling.futures_position_manager import FuturesPositionManager, PositionEvents
+from core.order_handling.futures_risk_manager import FuturesRiskManager, RiskEvents
+from core.order_handling.stop_loss_manager import StopLossManager, StopLossEvents
 from strategies.trading_performance_analyzer import TradingPerformanceAnalyzer
 from strategies.plotter import Plotter
+
+if TYPE_CHECKING:
+    from core.grid_management.dynamic_grid_manager import DynamicGridManager
 
 class GridTradingStrategy(TradingStrategyInterface):
     TICKER_REFRESH_INTERVAL = 3  # in seconds
@@ -33,7 +38,9 @@ class GridTradingStrategy(TradingStrategyInterface):
         trading_pair: str,
         plotter: Optional[Plotter] = None,
         funding_rate_tracker: Optional[FundingRateTracker] = None,
-        futures_position_manager: Optional[FuturesPositionManager] = None
+        futures_position_manager: Optional[FuturesPositionManager] = None,
+        futures_risk_manager: Optional['FuturesRiskManager'] = None,
+        stop_loss_manager: Optional['StopLossManager'] = None
     ):
         super().__init__(config_manager, balance_tracker)
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -52,6 +59,8 @@ class GridTradingStrategy(TradingStrategyInterface):
         # Futures-specific components
         self.funding_rate_tracker = funding_rate_tracker
         self.futures_position_manager = futures_position_manager
+        self.futures_risk_manager = futures_risk_manager
+        self.stop_loss_manager = stop_loss_manager
         self.market_type = self.config_manager.get_market_type()
         self.is_futures_market = self.market_type == MarketType.FUTURES
         
@@ -64,6 +73,17 @@ class GridTradingStrategy(TradingStrategyInterface):
         # Subscribe to position events if using futures
         if self.is_futures_market and self.futures_position_manager:
             self.event_bus.subscribe(PositionEvents.POSITION_LIQUIDATION_WARNING, self._handle_liquidation_warning)
+            
+        # Subscribe to risk events if using futures
+        if self.is_futures_market and self.futures_risk_manager:
+            self.event_bus.subscribe(RiskEvents.CIRCUIT_BREAKER_TRIGGERED, self._handle_circuit_breaker)
+            self.event_bus.subscribe(RiskEvents.DRAWDOWN_THRESHOLD_EXCEEDED, self._handle_drawdown_exceeded)
+            self.event_bus.subscribe(RiskEvents.MARGIN_HEALTH_WARNING, self._handle_margin_health_warning)
+            
+        # Subscribe to stop loss events if using futures
+        if self.is_futures_market and self.stop_loss_manager:
+            self.event_bus.subscribe(StopLossEvents.STOP_LOSS_TRIGGERED, self._handle_stop_loss_triggered)
+            self.event_bus.subscribe(StopLossEvents.STOP_LOSS_WARNING, self._handle_stop_loss_warning)
     
     def _initialize_historical_data(self) -> Optional[pd.DataFrame]:
         """
@@ -97,12 +117,33 @@ class GridTradingStrategy(TradingStrategyInterface):
         Initializes the trading strategy by setting up the grid and levels.
         This method prepares the strategy to be ready for trading.
         """
-        self.grid_manager.initialize_grids_and_levels()
+        # Check if we're using dynamic grid manager
+        if hasattr(self.grid_manager, 'initialize_dynamic_grids'):
+            # Dynamic grid manager is initialized separately in GridTradingBot
+            pass
+        else:
+            # Standard grid manager initialization
+            self.grid_manager.initialize_grids_and_levels()
         
         # Initialize funding rate tracking data if using perpetual futures
         if self.is_futures_market and self.config_manager.get_contract_type() == "perpetual":
             self.funding_payments = []
             self.funding_rate_history = []
+            
+        # Initialize futures-specific strategy parameters
+        if self.is_futures_market:
+            # Load futures trading parameters
+            self.leverage = self.config_manager.get_leverage()
+            self.margin_type = self.config_manager.get_margin_type()
+            self.contract_type = self.config_manager.get_contract_type()
+            self.hedge_mode = self.config_manager.is_hedge_mode_enabled()
+            
+            # Initialize position tracking
+            self.active_positions = {}
+            self.position_history = []
+            
+            # Initialize risk metrics tracking
+            self.risk_metrics_history = []
     
     async def stop(self):
         """
@@ -186,6 +227,10 @@ class GridTradingStrategy(TradingStrategyInterface):
                 # Check for funding rate-based strategy adjustments if using perpetual futures
                 if self.is_futures_market and self.funding_rate_tracker:
                     await self._check_funding_rate_strategy_adjustments(current_price)
+                    
+                # Check for risk-based strategy adjustments if using futures
+                if self.is_futures_market and self.futures_risk_manager:
+                    await self._check_risk_based_strategy_adjustments(current_price)
                 
                 last_price = current_price
 
@@ -479,10 +524,220 @@ class GridTradingStrategy(TradingStrategyInterface):
                 # Positive funding rate - longs pay shorts
                 # Consider reducing long exposure or increasing short exposure
                 self.logger.info(f"High positive funding rate ({current_funding_rate:.6f}). Consider adjusting position.")
+                
+                # If auto-hedge is enabled, consider hedging
+                if self.is_futures_market and self.futures_position_manager and self.config_manager.is_funding_rate_auto_hedge_enabled():
+                    # Check if we have a long position
+                    long_position = await self.futures_position_manager.get_position("long")
+                    if long_position and long_position.get('size', 0) > 0:
+                        # Calculate hedge amount based on funding rate
+                        hedge_ratio = min(abs(current_funding_rate) * 100, 0.5)  # Max 50% hedge
+                        hedge_size = long_position.get('size', 0) * hedge_ratio
+                        
+                        self.logger.info(f"Auto-hedging long position with short position of size {hedge_size} due to high funding rate")
+                        
+                        # Open a hedge position if not already hedged
+                        if not await self.futures_position_manager.get_position("short"):
+                            # Implementation would depend on specific exchange API
+                            pass
             else:
                 # Negative funding rate - shorts pay longs
                 # Consider increasing long exposure or reducing short exposure
                 self.logger.info(f"High negative funding rate ({current_funding_rate:.6f}). Consider adjusting position.")
+                
+                # If auto-hedge is enabled, consider hedging
+                if self.is_futures_market and self.futures_position_manager and self.config_manager.is_funding_rate_auto_hedge_enabled():
+                    # Check if we have a short position
+                    short_position = await self.futures_position_manager.get_position("short")
+                    if short_position and short_position.get('size', 0) > 0:
+                        # Calculate hedge amount based on funding rate
+                        hedge_ratio = min(abs(current_funding_rate) * 100, 0.5)  # Max 50% hedge
+                        hedge_size = short_position.get('size', 0) * hedge_ratio
+                        
+                        self.logger.info(f"Auto-hedging short position with long position of size {hedge_size} due to high funding rate")
+                        
+                        # Open a hedge position if not already hedged
+                        if not await self.futures_position_manager.get_position("long"):
+                            # Implementation would depend on specific exchange API
+                            pass
+    
+    async def _check_risk_based_strategy_adjustments(self, current_price: float) -> None:
+        """
+        Checks if strategy adjustments are needed based on risk metrics.
+        
+        Args:
+            current_price: Current market price
+        """
+        if not self.futures_risk_manager:
+            return
+            
+        # Get current risk metrics
+        risk_metrics = self.futures_risk_manager.risk_metrics
+        
+        # Check margin health
+        margin_health = risk_metrics.get("margin_health", 1.0)
+        if margin_health < 0.5:  # Less than 50% margin health
+            self.logger.warning(f"Low margin health ({margin_health:.2f}). Considering position reduction.")
+            
+            # If margin health is critical, reduce positions
+            if margin_health < 0.2:  # Less than 20% margin health
+                self.logger.warning("Critical margin health. Reducing positions.")
+                
+                # Get all positions
+                positions = await self.futures_position_manager.get_all_positions()
+                
+                # Reduce each position by 25%
+                for position in positions:
+                    position_side = position.get('position_side')
+                    
+                    # Close 25% of the position
+                    await self.futures_position_manager.close_position(
+                        side=position_side,
+                        percentage=25,  # 25% reduction
+                        order_type="market"  # Use market order for immediate execution
+                    )
+        
+        # Check liquidation risk level
+        liquidation_risk = risk_metrics.get("liquidation_risk_level", 0.0)
+        if liquidation_risk > 0.7:  # High liquidation risk
+            self.logger.warning(f"High liquidation risk ({liquidation_risk:.2f}). Taking protective action.")
+            
+            # Get all positions
+            positions = await self.futures_position_manager.get_all_positions()
+            
+            # Reduce highest risk position by 50%
+            if positions:
+                # Find position with highest risk (implementation would depend on specific risk calculation)
+                highest_risk_position = positions[0]  # Simplified for example
+                position_side = highest_risk_position.get('position_side')
+                
+                # Close 50% of the position
+                await self.futures_position_manager.close_position(
+                    side=position_side,
+                    percentage=50,  # 50% reduction
+                    order_type="market"  # Use market order for immediate execution
+                )
+    
+    async def _handle_circuit_breaker(self, event_data: Dict[str, Any]) -> None:
+        """
+        Handles circuit breaker events from the FuturesRiskManager.
+        
+        Args:
+            event_data: Circuit breaker event data
+        """
+        self.logger.warning(
+            f"Circuit breaker triggered for {event_data.get('pair')}: "
+            f"Price change {event_data.get('price_change', 0):.2%} exceeds threshold {event_data.get('threshold', 0):.2%}"
+        )
+        
+        # Pause trading during circuit breaker
+        self.logger.info("Pausing trading during circuit breaker period")
+        
+        # Wait for cooldown period
+        cooldown_period = event_data.get('cooldown_period', 300)  # Default 5 minutes
+        await asyncio.sleep(cooldown_period)
+        
+        self.logger.info("Resuming trading after circuit breaker cooldown")
+    
+    async def _handle_drawdown_exceeded(self, event_data: Dict[str, Any]) -> None:
+        """
+        Handles drawdown threshold exceeded events from the FuturesRiskManager.
+        
+        Args:
+            event_data: Drawdown event data
+        """
+        current_drawdown = event_data.get('current_drawdown', 0.0)
+        threshold = event_data.get('threshold', 0.0)
+        
+        self.logger.warning(
+            f"Drawdown threshold exceeded: Current drawdown {current_drawdown:.2%} exceeds threshold {threshold:.2%}"
+        )
+        
+        # If auto-close is enabled and drawdown is severe, close positions
+        if event_data.get('auto_close_enabled', False) and current_drawdown > event_data.get('critical_threshold', 0.3):
+            self.logger.warning("Critical drawdown reached. Closing positions to prevent further losses.")
+            
+            # Get all positions
+            positions = await self.futures_position_manager.get_all_positions()
+            
+            # Close all positions
+            for position in positions:
+                position_side = position.get('position_side')
+                
+                # Close the position
+                await self.futures_position_manager.close_position(
+                    side=position_side,
+                    percentage=100,  # Close entire position
+                    order_type="market"  # Use market order for immediate execution
+                )
+    
+    async def _handle_margin_health_warning(self, event_data: Dict[str, Any]) -> None:
+        """
+        Handles margin health warning events from the FuturesRiskManager.
+        
+        Args:
+            event_data: Margin health warning data
+        """
+        self.logger.warning(
+            f"Margin health warning: Available margin {event_data.get('available_margin', 0):.2f} "
+            f"is {event_data.get('margin_ratio', 0):.2f}x used margin {event_data.get('used_margin', 0):.2f}"
+        )
+        
+        # If auto-reduce is enabled, reduce positions
+        if event_data.get('auto_reduce_enabled', False):
+            self.logger.warning("Auto-reducing positions to improve margin health")
+            
+            # Get all positions
+            positions = await self.futures_position_manager.get_all_positions()
+            
+            # Reduce each position by the specified percentage
+            reduction_percentage = event_data.get('auto_reduce_percentage', 25)  # Default 25%
+            for position in positions:
+                position_side = position.get('position_side')
+                
+                # Close part of the position
+                await self.futures_position_manager.close_position(
+                    side=position_side,
+                    percentage=reduction_percentage,
+                    order_type="market"  # Use market order for immediate execution
+                )
+    
+    async def _handle_stop_loss_triggered(self, event_data: Dict[str, Any]) -> None:
+        """
+        Handles stop loss triggered events from the StopLossManager.
+        
+        Args:
+            event_data: Stop loss triggered data
+        """
+        self.logger.warning(
+            f"Stop loss triggered for {event_data.get('pair')} {event_data.get('position_side')}: "
+            f"Reason: {event_data.get('reason')}"
+        )
+        
+        # Stop loss execution is handled by the StopLossManager
+        # We just need to update our strategy state
+        position_id = event_data.get('position_id')
+        if position_id and position_id in self.active_positions:
+            self.active_positions[position_id]['stop_loss_triggered'] = True
+    
+    async def _handle_stop_loss_warning(self, event_data: Dict[str, Any]) -> None:
+        """
+        Handles stop loss warning events from the StopLossManager.
+        
+        Args:
+            event_data: Stop loss warning data
+        """
+        stop_loss_type = event_data.get('stop_loss_type', '')
+        current_loss = event_data.get('current_loss', 0)
+        max_loss = event_data.get('max_loss', 0)
+        
+        self.logger.warning(
+            f"Stop loss warning: {stop_loss_type} - Current loss {current_loss:.2f} "
+            f"approaching threshold {max_loss:.2f}"
+        )
+        
+        # We could implement additional protective measures here
+        # For example, we might want to hedge the position or reduce its size
     
     def get_funding_rate_summary(self) -> Dict[str, Any]:
         """
@@ -501,6 +756,45 @@ class GridTradingStrategy(TradingStrategyInterface):
             "funding_history_count": len(self.funding_rate_history),
             "funding_payments_count": len(self.funding_payments)
         }
+        
+    def get_risk_metrics_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of risk metrics.
+        
+        Returns:
+            Dictionary with risk metrics summary
+        """
+        if not self.is_futures_market or not self.futures_risk_manager:
+            return {"enabled": False}
+            
+        return {
+            "enabled": True,
+            "liquidation_risk_level": self.futures_risk_manager.risk_metrics.get("liquidation_risk_level", 0.0),
+            "margin_health": self.futures_risk_manager.risk_metrics.get("margin_health", 1.0),
+            "current_drawdown": self.futures_risk_manager.risk_metrics.get("current_drawdown", 0.0),
+            "max_drawdown": self.futures_risk_manager.risk_metrics.get("max_drawdown", 0.0),
+            "circuit_breaker_active": self.futures_risk_manager.circuit_breaker_active
+        }
+        
+    def get_position_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of current positions.
+        
+        Returns:
+            Dictionary with position summary
+        """
+        if not self.is_futures_market or not self.futures_position_manager:
+            return {"enabled": False}
+            
+        return {
+            "enabled": True,
+            "active_positions_count": len(self.active_positions),
+            "position_history_count": len(self.position_history),
+            "leverage": self.leverage,
+            "margin_type": self.margin_type,
+            "contract_type": self.contract_type,
+            "hedge_mode": self.hedge_mode
+        }
     
     def get_formatted_orders(self):
         """
@@ -510,3 +804,93 @@ class GridTradingStrategy(TradingStrategyInterface):
             list: A list of formatted orders.
         """
         return self.trading_performance_analyzer.get_formatted_orders()
+        
+    async def open_futures_position(self, side: str, size: float, price: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Open a new futures position.
+        
+        Args:
+            side: Position side ('long' or 'short')
+            size: Position size
+            price: Optional limit price (if None, uses market price)
+            
+        Returns:
+            Dictionary with position details
+        """
+        if not self.is_futures_market or not self.futures_position_manager:
+            self.logger.error("Cannot open futures position: Futures trading not enabled")
+            return {"success": False, "error": "Futures trading not enabled"}
+            
+        try:
+            # Check if position is within risk limits
+            is_within_limits, risk_info = await self.futures_risk_manager.is_position_within_risk_limits(side, size, price or 0)
+            
+            if not is_within_limits:
+                self.logger.warning(f"Position exceeds risk limits: {risk_info}")
+                return {"success": False, "error": "Position exceeds risk limits", "risk_info": risk_info}
+            
+            # Open position through exchange service
+            # Implementation would depend on specific exchange API
+            # This is a placeholder for the actual implementation
+            position_id = f"{self.trading_pair}-{side}-{datetime.utcnow().timestamp()}"
+            
+            # Track the position
+            self.active_positions[position_id] = {
+                "side": side,
+                "size": size,
+                "entry_price": price,
+                "open_time": datetime.utcnow(),
+                "stop_loss_triggered": False
+            }
+            
+            return {"success": True, "position_id": position_id}
+            
+        except Exception as e:
+            self.logger.error(f"Error opening futures position: {e}")
+            return {"success": False, "error": str(e)}
+            
+    async def close_futures_position(self, position_id: str, percentage: float = 100.0) -> Dict[str, Any]:
+        """
+        Close an existing futures position.
+        
+        Args:
+            position_id: ID of the position to close
+            percentage: Percentage of the position to close (default: 100%)
+            
+        Returns:
+            Dictionary with result details
+        """
+        if not self.is_futures_market or not self.futures_position_manager:
+            self.logger.error("Cannot close futures position: Futures trading not enabled")
+            return {"success": False, "error": "Futures trading not enabled"}
+            
+        try:
+            # Check if position exists
+            if position_id not in self.active_positions:
+                self.logger.error(f"Position {position_id} not found")
+                return {"success": False, "error": "Position not found"}
+            
+            position = self.active_positions[position_id]
+            
+            # Close position through position manager
+            result = await self.futures_position_manager.close_position(
+                side=position["side"],
+                percentage=percentage,
+                order_type="market"
+            )
+            
+            # Update position tracking
+            if percentage >= 100:
+                # Position fully closed
+                position_history = self.active_positions.pop(position_id)
+                position_history["close_time"] = datetime.utcnow()
+                self.position_history.append(position_history)
+            else:
+                # Position partially closed
+                self.active_positions[position_id]["size"] *= (1 - percentage / 100)
+            
+            return {"success": True, "result": result}
+            
+        except Exception as e:
+            self.logger.error(f"Error closing futures position: {e}")
+            return {"success": False, "error": str(e)}

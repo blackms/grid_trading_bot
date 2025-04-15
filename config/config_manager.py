@@ -367,3 +367,92 @@ class ConfigManager:
     def get_min_order_value(self) -> float:
         dynamic_grid = self.get_dynamic_grid_settings()
         return dynamic_grid.get('min_order_value', 5.0)  # Default to 5 units of quote currency
+        
+    # --- Stop Loss Manager Settings Accessor Methods ---
+    def get_stop_loss_manager_settings(self):
+        futures_risk = self.get_futures_risk_management()
+        return futures_risk.get('stop_loss_manager', {})
+    
+    def is_stop_loss_manager_enabled(self) -> bool:
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('enabled', True)  # Default to enabled for futures
+    
+    def get_stop_loss_monitoring_interval(self) -> int:
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('monitoring_interval', 5)  # Default to 5 seconds
+    
+    def get_stop_loss_execution_type(self) -> str:
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('execution_type', 'market')  # Default to market order
+    
+    def is_partial_close_enabled(self) -> bool:
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('partial_close_enabled', False)
+    
+    def get_partial_close_percentage(self) -> float:
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('partial_close_percentage', 0.5)  # Default to 50%
+    
+    def get_usdt_stop_loss_settings(self):
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('usdt_stop_loss', {})
+    
+    def is_usdt_stop_loss_enabled(self) -> bool:
+        usdt_stop_loss = self.get_usdt_stop_loss_settings()
+        return usdt_stop_loss.get('enabled', False)
+    
+    def get_usdt_stop_loss_max_loss_amount(self) -> float:
+        usdt_stop_loss = self.get_usdt_stop_loss_settings()
+        return usdt_stop_loss.get('max_loss_amount', 1000.0)  # Default to 1000 USDT
+    
+    def is_usdt_stop_loss_per_position(self) -> bool:
+        usdt_stop_loss = self.get_usdt_stop_loss_settings()
+        return usdt_stop_loss.get('per_position', False)
+    
+    def get_usdt_stop_loss_warning_threshold(self) -> float:
+        usdt_stop_loss = self.get_usdt_stop_loss_settings()
+        return usdt_stop_loss.get('warning_threshold', 0.7)  # Default to 70% of max loss
+    
+    def get_portfolio_stop_loss_settings(self):
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('portfolio_stop_loss', {})
+    
+    def is_portfolio_stop_loss_enabled(self) -> bool:
+        portfolio_stop_loss = self.get_portfolio_stop_loss_settings()
+        return portfolio_stop_loss.get('enabled', False)
+    
+    def get_portfolio_stop_loss_max_loss_percentage(self) -> float:
+        portfolio_stop_loss = self.get_portfolio_stop_loss_settings()
+        return portfolio_stop_loss.get('max_loss_percentage', 0.1)  # Default to 10% of portfolio
+    
+    def get_portfolio_stop_loss_warning_threshold(self) -> float:
+        portfolio_stop_loss = self.get_portfolio_stop_loss_settings()
+        return portfolio_stop_loss.get('warning_threshold', 0.7)  # Default to 70% of max loss
+    
+    def get_trailing_stop_loss_settings(self):
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('trailing_stop_loss', {})
+    
+    def is_trailing_stop_loss_enabled(self) -> bool:
+        trailing_stop_loss = self.get_trailing_stop_loss_settings()
+        return trailing_stop_loss.get('enabled', False)
+    
+    def get_trailing_stop_loss_activation_threshold(self) -> float:
+        trailing_stop_loss = self.get_trailing_stop_loss_settings()
+        return trailing_stop_loss.get('activation_threshold', 0.02)  # Default to 2% profit
+    
+    def get_trailing_stop_loss_distance(self) -> float:
+        trailing_stop_loss = self.get_trailing_stop_loss_settings()
+        return trailing_stop_loss.get('trailing_distance', 0.01)  # Default to 1% trailing distance
+    
+    def get_external_signals_settings(self):
+        stop_loss_manager = self.get_stop_loss_manager_settings()
+        return stop_loss_manager.get('external_signals', {})
+    
+    def is_external_signals_enabled(self) -> bool:
+        external_signals = self.get_external_signals_settings()
+        return external_signals.get('enabled', False)
+    
+    def get_external_signals_sources(self) -> list:
+        external_signals = self.get_external_signals_settings()
+        return external_signals.get('signal_sources', [])

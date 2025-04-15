@@ -1,5 +1,6 @@
 import pytest, os
 from unittest.mock import Mock, AsyncMock, patch, MagicMock, ANY
+from datetime import datetime
 from config.config_manager import ConfigManager
 from core.bot_management.grid_trading_bot import GridTradingBot
 from core.bot_management.event_bus import EventBus
@@ -23,6 +24,8 @@ class TestGridTradingBot:
         mock_config.get_top_range.return_value = 2000
         mock_config.get_bottom_range.return_value = 1500
         mock_config.get_num_grids.return_value = 10
+        mock_config.get_market_type.return_value = None
+        mock_config.is_futures_market.return_value = False
         return mock_config
 
     @pytest.fixture
@@ -293,3 +296,247 @@ class TestGridTradingBot:
         bot.strategy.plot_results.assert_called_once()
         bot.strategy.run.assert_awaited_once()
         bot.order_status_tracker.start_tracking.assert_called_once()
+        
+    @pytest.fixture
+    def futures_config_manager(self):
+        mock_config = Mock(spec=ConfigManager)
+        mock_config.get_trading_mode.return_value = TradingMode.LIVE
+        mock_config.get_initial_balance.return_value = 1000
+        mock_config.get_exchange_name.return_value = "bybit"
+        mock_config.get_spacing_type.return_value = "arithmetic"
+        mock_config.get_top_range.return_value = 2000
+        mock_config.get_bottom_range.return_value = 1500
+        mock_config.get_num_grids.return_value = 10
+        
+        # Futures-specific configuration
+        from config.market_type import MarketType
+        mock_config.get_market_type.return_value = MarketType.FUTURES
+        mock_config.is_futures_market.return_value = True
+        mock_config.get_contract_type.return_value = "perpetual"
+        mock_config.get_leverage.return_value = 5
+        mock_config.get_margin_type.return_value = "isolated"
+        mock_config.is_hedge_mode_enabled.return_value = False
+        mock_config.is_liquidation_protection_enabled.return_value = True
+        mock_config.get_liquidation_protection_threshold.return_value = 0.3
+        mock_config.is_dynamic_grid_enabled.return_value = True
+        mock_config.is_funding_rate_monitoring_enabled.return_value = True
+        mock_config.is_stop_loss_manager_enabled.return_value = True
+        
+        return mock_config
+    
+    @pytest.fixture
+    def futures_bot(self, futures_config_manager, notification_handler, mock_event_bus):
+        with patch("core.bot_management.grid_trading_bot.FuturesPositionManager") as mock_position_manager, \
+             patch("core.bot_management.grid_trading_bot.FuturesRiskManager") as mock_risk_manager, \
+             patch("core.bot_management.grid_trading_bot.FundingRateTracker") as mock_funding_tracker, \
+             patch("core.bot_management.grid_trading_bot.DynamicGridManager") as mock_dynamic_grid, \
+             patch("core.bot_management.grid_trading_bot.StopLossManager") as mock_stop_loss:
+            
+            return GridTradingBot(
+                config_path="futures_config.json",
+                config_manager=futures_config_manager,
+                notification_handler=notification_handler,
+                event_bus=mock_event_bus,
+                save_performance_results_path="futures_results.json",
+                no_plot=True
+            )
+    
+    @pytest.mark.asyncio
+    async def test_futures_bot_initialization(self, futures_bot):
+        # Verify futures components are initialized
+        assert futures_bot.futures_position_manager is not None
+        assert futures_bot.futures_risk_manager is not None
+        assert futures_bot.funding_rate_tracker is not None
+        assert futures_bot.dynamic_grid_manager is not None
+        assert futures_bot.stop_loss_manager is not None
+    
+    @pytest.mark.asyncio
+    async def test_futures_bot_run(self, futures_bot):
+        # Mock dependencies
+        futures_bot.balance_tracker = Mock()
+        futures_bot.balance_tracker.setup_balances = AsyncMock()
+        futures_bot.order_status_tracker.start_tracking = Mock()
+        futures_bot.strategy.run = AsyncMock()
+        futures_bot.strategy.initialize_strategy = Mock()
+        futures_bot._generate_and_log_performance = Mock()
+        
+        # Mock futures components
+        futures_bot.futures_position_manager.initialize = AsyncMock()
+        futures_bot.futures_risk_manager.initialize = AsyncMock()
+        futures_bot.funding_rate_tracker.initialize = AsyncMock()
+        futures_bot.dynamic_grid_manager.initialize_dynamic_grids = AsyncMock()
+        futures_bot.stop_loss_manager.initialize = AsyncMock()
+        
+        # Run the bot
+        await futures_bot.run()
+        
+        # Verify futures components are initialized
+        futures_bot.futures_position_manager.initialize.assert_awaited_once()
+        futures_bot.futures_risk_manager.initialize.assert_awaited_once()
+        futures_bot.funding_rate_tracker.initialize.assert_awaited_once()
+        futures_bot.dynamic_grid_manager.initialize_dynamic_grids.assert_awaited_once()
+        futures_bot.stop_loss_manager.initialize.assert_awaited_once()
+        
+        # Verify strategy is run
+        futures_bot.strategy.run.assert_awaited_once()
+    
+    @pytest.mark.asyncio
+    async def test_futures_bot_stop(self, futures_bot):
+        # Mock dependencies
+        futures_bot.is_running = True
+        futures_bot.strategy.stop = AsyncMock()
+        futures_bot.order_status_tracker.stop_tracking = AsyncMock()
+        
+        # Mock futures components
+        futures_bot.futures_position_manager.shutdown = AsyncMock()
+        futures_bot.futures_risk_manager.shutdown = AsyncMock()
+        futures_bot.funding_rate_tracker.shutdown = AsyncMock()
+        futures_bot.dynamic_grid_manager.shutdown = AsyncMock()
+        futures_bot.stop_loss_manager.shutdown = AsyncMock()
+        
+        # Stop the bot
+        await futures_bot._stop()
+        
+        # Verify futures components are shut down
+        futures_bot.funding_rate_tracker.shutdown.assert_awaited_once()
+        futures_bot.stop_loss_manager.shutdown.assert_awaited_once()
+        futures_bot.dynamic_grid_manager.shutdown.assert_awaited_once()
+        futures_bot.futures_risk_manager.shutdown.assert_awaited_once()
+        futures_bot.futures_position_manager.shutdown.assert_awaited_once()
+        
+        # Verify strategy is stopped
+        futures_bot.strategy.stop.assert_awaited_once()
+        futures_bot.order_status_tracker.stop_tracking.assert_awaited_once()
+        
+        # Verify bot is no longer running
+        assert not futures_bot.is_running
+    
+    @pytest.mark.asyncio
+    async def test_futures_bot_health_status(self, futures_bot):
+        # Mock dependencies
+        futures_bot._check_strategy_health = AsyncMock(return_value=True)
+        futures_bot._get_exchange_status = AsyncMock(return_value="ok")
+        
+        # Get health status
+        health_status = await futures_bot.get_bot_health_status()
+        
+        # Verify health status includes futures components
+        assert health_status["strategy"] is True
+        assert health_status["exchange_status"] == "ok"
+        assert "futures_position_manager" in health_status
+        assert "futures_risk_manager" in health_status
+        assert "funding_rate_tracker" in health_status
+        assert "dynamic_grid_manager" in health_status
+        assert "stop_loss_manager" in health_status
+        assert health_status["overall"] is True
+    
+    @pytest.mark.asyncio
+    async def test_futures_bot_get_balances(self, futures_bot):
+        # Mock dependencies
+        futures_bot.balance_tracker = Mock()
+        futures_bot.balance_tracker.balance = 1000.0
+        futures_bot.balance_tracker.reserved_fiat = 200.0
+        futures_bot.balance_tracker.crypto_balance = 0.5
+        futures_bot.balance_tracker.reserved_crypto = 0.1
+        
+        # Mock futures components
+        futures_bot.futures_position_manager.get_all_positions = Mock(return_value=[
+            {"pair": "BTC/USDT", "position_side": "long", "size": 0.1, "entry_price": 60000}
+        ])
+        futures_bot.funding_rate_tracker.current_funding_rate = 0.0001
+        futures_bot.funding_rate_tracker.next_funding_time = datetime.now()
+        futures_bot.futures_risk_manager.risk_metrics = {"liquidation_risk_level": 0.1}
+        futures_bot.stop_loss_manager.stop_loss_metrics = {"current_usdt_loss": 0.0}
+        
+        # Get balances
+        balances = futures_bot.get_balances()
+        
+        # Verify balances include futures information
+        assert balances["fiat"] == 1000.0
+        assert balances["reserved_fiat"] == 200.0
+        assert balances["crypto"] == 0.5
+        assert balances["reserved_crypto"] == 0.1
+        assert "futures" in balances
+        assert "positions" in balances["futures"]
+        assert "current_funding_rate" in balances["futures"]
+        assert "next_funding_time" in balances["futures"]
+        assert "risk_metrics" in balances["futures"]
+        assert "stop_loss_metrics" in balances["futures"]
+    
+    @pytest.mark.asyncio
+    async def test_get_funding_rate_info(self, futures_bot):
+        # Mock funding rate tracker
+        futures_bot.funding_rate_tracker.get_current_funding_info = AsyncMock(return_value={
+            "current_rate": 0.0001,
+            "next_funding_time": "2025-04-15T08:00:00"
+        })
+        
+        # Get funding rate info
+        funding_info = await futures_bot.get_funding_rate_info()
+        
+        # Verify funding rate info
+        assert funding_info is not None
+        assert "current_rate" in funding_info
+        assert "next_funding_time" in funding_info
+    
+    @pytest.mark.asyncio
+    async def test_get_funding_rate_forecast(self, futures_bot):
+        # Mock funding rate tracker
+        futures_bot.funding_rate_tracker.forecast_funding_rates = AsyncMock(return_value=[
+            {"timestamp": "2025-04-15T08:00:00", "forecasted_rate": 0.0001, "confidence": 0.8}
+        ])
+        
+        # Get funding rate forecast
+        forecast = await futures_bot.get_funding_rate_forecast()
+        
+        # Verify forecast
+        assert forecast is not None
+        assert len(forecast) == 1
+        assert "timestamp" in forecast[0]
+        assert "forecasted_rate" in forecast[0]
+        assert "confidence" in forecast[0]
+    
+    @pytest.mark.asyncio
+    async def test_get_stop_loss_metrics(self, futures_bot):
+        # Mock stop loss manager
+        futures_bot.stop_loss_manager.get_stop_loss_metrics = AsyncMock(return_value={
+            "current_usdt_loss": 0.0,
+            "current_portfolio_loss_percentage": 0.0
+        })
+        
+        # Get stop loss metrics
+        metrics = await futures_bot.get_stop_loss_metrics()
+        
+        # Verify metrics
+        assert metrics is not None
+        assert "current_usdt_loss" in metrics
+        assert "current_portfolio_loss_percentage" in metrics
+    
+    @pytest.mark.asyncio
+    async def test_update_stop_loss_settings(self, futures_bot):
+        # Mock stop loss manager
+        futures_bot.stop_loss_manager.update_stop_loss_settings = AsyncMock()
+        
+        # Update stop loss settings
+        new_settings = {"usdt_stop_loss": {"max_loss_amount": 500.0}}
+        result = await futures_bot.update_stop_loss_settings(new_settings)
+        
+        # Verify settings were updated
+        futures_bot.stop_loss_manager.update_stop_loss_settings.assert_awaited_once_with(new_settings)
+        assert result is True
+    
+    @pytest.mark.asyncio
+    async def test_get_risk_metrics(self, futures_bot):
+        # Mock risk manager
+        futures_bot.futures_risk_manager.risk_metrics = {
+            "liquidation_risk_level": 0.1,
+            "margin_health": 0.9
+        }
+        
+        # Get risk metrics
+        metrics = await futures_bot.get_risk_metrics()
+        
+        # Verify metrics
+        assert metrics is not None
+        assert "liquidation_risk_level" in metrics
+        assert "margin_health" in metrics
