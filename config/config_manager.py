@@ -3,6 +3,7 @@ from typing import Optional
 from strategies.spacing_type import SpacingType
 from strategies.strategy_type import StrategyType
 from .trading_mode import TradingMode
+from .market_type import MarketType
 from .exceptions import ConfigFileNotFoundError, ConfigParseError
 
 class ConfigManager:
@@ -148,6 +149,63 @@ class ConfigManager:
         stop_loss = self.get_stop_loss()
         return stop_loss.get('threshold', None)
 
+    # --- Market Type Accessor Methods ---
+    def get_market_type(self) -> Optional[MarketType]:
+        exchange = self.get_exchange()
+        market_type = exchange.get('market_type', 'spot')  # Default to spot for backward compatibility
+        
+        if market_type:
+            return MarketType.from_string(market_type)
+    
+    def is_futures_market(self) -> bool:
+        market_type = self.get_market_type()
+        return market_type == MarketType.FUTURES if market_type else False
+    
+    # --- Futures Settings Accessor Methods ---
+    def get_futures_settings(self):
+        return self.config.get('futures_settings', {})
+    
+    def get_contract_type(self):
+        futures_settings = self.get_futures_settings()
+        return futures_settings.get('contract_type', 'perpetual')
+    
+    def get_leverage(self):
+        futures_settings = self.get_futures_settings()
+        return futures_settings.get('leverage', 1)
+    
+    def get_margin_type(self):
+        futures_settings = self.get_futures_settings()
+        return futures_settings.get('margin_type', 'isolated')
+    
+    def is_hedge_mode_enabled(self) -> bool:
+        futures_settings = self.get_futures_settings()
+        return futures_settings.get('hedge_mode', False)
+    
+    def get_contract_size(self):
+        pair = self.get_pair()
+        return pair.get('contract_size', 1)
+    
+    # --- Futures Risk Management Accessor Methods ---
+    def get_futures_risk_management(self):
+        risk_management = self.get_risk_management()
+        return risk_management.get('futures', {})
+    
+    def get_liquidation_protection(self):
+        futures_risk = self.get_futures_risk_management()
+        return futures_risk.get('liquidation_protection', {})
+    
+    def is_liquidation_protection_enabled(self) -> bool:
+        liquidation_protection = self.get_liquidation_protection()
+        return liquidation_protection.get('enabled', False)
+    
+    def get_liquidation_protection_threshold(self):
+        liquidation_protection = self.get_liquidation_protection()
+        return liquidation_protection.get('threshold', 0.5)  # Default to 50% of the distance to liquidation
+    
+    def get_max_position_size(self):
+        futures_risk = self.get_futures_risk_management()
+        return futures_risk.get('max_position_size', None)
+    
     # --- Logging Accessor Methods ---
     def get_logging(self):
         return self.config.get('logging', {})

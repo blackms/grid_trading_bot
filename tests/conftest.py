@@ -7,11 +7,18 @@ def valid_config():
         "exchange": {
             "name": "binance",
             "trading_fee": 0.001,
-            'trading_mode': 'backtest'
+            'trading_mode': 'backtest',
+            'market_type': 'spot'  # Default to spot for backward compatibility
         },
         "pair": {
             "base_currency": "ETH",
             "quote_currency": "USDT"
+        },
+        "futures_settings": {  # New section for futures settings
+            "contract_type": "perpetual",
+            "leverage": 3,
+            "margin_type": "isolated",
+            "hedge_mode": False
         },
         "trading_settings": {
             "initial_balance": 10000,
@@ -39,6 +46,13 @@ def valid_config():
             "stop_loss": {
                 "enabled": False,
                 "threshold": 2830
+            },
+            "futures": {  # New section for futures risk management
+                "liquidation_protection": {
+                    "enabled": True,
+                    "threshold": 0.5
+                },
+                "max_position_size": 5
             }
         },
         "logging": {
