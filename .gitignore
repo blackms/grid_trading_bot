@@ -42,3 +42,5 @@ logs/*
 
 project_journal/
 chats.db
+
+venv/
