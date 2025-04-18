@@ -316,7 +316,14 @@ class BacktestExchangeService(ExchangeInterface):
         self.logger.info(f"[BACKTEST] Getting contract specifications for {pair}")
         
         # Return simulated contract specifications based on the pair
-        base_currency, quote_currency = pair.split('/')
+        base_currency, quote_with_settlement = pair.split('/')
+        
+        # Handle futures pairs format like "BTC/USDT:USDT"
+        if ':' in quote_with_settlement:
+            quote_currency, settlement_currency = quote_with_settlement.split(':')
+        else:
+            quote_currency = quote_with_settlement
+            settlement_currency = quote_with_settlement
         
         return {
             "pair": pair,
@@ -330,5 +337,5 @@ class BacktestExchangeService(ExchangeInterface):
             "maintenance_margin_rate": 0.005,  # 0.5%
             "is_inverse": False,
             "is_linear": True,
-            "settlement_currency": quote_currency
+            "settlement_currency": settlement_currency
         }
